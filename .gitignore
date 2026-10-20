@@ -1,0 +1,19 @@
+# Compilação
+build/
+bin/
+obj/
+
+# Configurações de IDE
+.vscode/
+.clangd
+.idea/
+
+# Dev Containers
+.devcontainer/
+
+# Metadados do macOS
+**/.DS_Store
+
+# Arquivos de configuração temporários
+sdkconfig
+sdkconfig.old
