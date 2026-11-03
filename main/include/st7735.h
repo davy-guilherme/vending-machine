@@ -26,6 +26,17 @@
 #define COLOR_BLUE    0x001F
 #define COLOR_YELLOW 0xFFE0
 #define COLOR_GRAY   0x8410
+#define COLOR_NAVY_DARK   0x10EF  // Fundo principal da tela
+#define COLOR_TEAL_DARK   0x02A9  // Fundo do retângulo da opção selecionada
+#define COLOR_SILVER      0xC618  // Texto dos itens não selecionados
+#define COLOR_YELLOW      0xFFE0  // Texto e seta da opção selecionada
+// Paleta Leve & Natural (RGB565)
+#define COLOR_SAGE_DARK     0x19E6  // Fundo principal (Verde Salvia Escuro)
+#define COLOR_MOSS_GREEN    0x2B48  // Barra de cabeçalho (Verde Musgo)
+#define COLOR_ORANGE_WARM   0xFC00  // Destaque da seleção (Laranja Quente)
+#define COLOR_CREAM         0xF77D  // Texto dos itens em espera (Bege/Creme)
+#define COLOR_AMBER         0xFDE0  // Marcador '>' (Laranja Amarelado)
+
 
 // Estrutura do Display
 typedef struct {
