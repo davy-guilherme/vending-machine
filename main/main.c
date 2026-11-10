@@ -1,366 +1,276 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "st7735.h"
 #include "a4988.h"
 
-// Instâncias de Hardware
+// ==========================================
+// CONFIGURAÇÕES E PINOS (Fácil manutenção)
+// ==========================================
+#define PIN_BTN_ESQ     19
+#define PIN_BTN_DIR     21
+#define PIN_BALANCA     23
+
+#define PIN_DISP_SCK    18
+#define PIN_DISP_MOSI   22 // 18 e 19 ou 22 e 23
+#define PIN_DISP_CS     5 
+#define PIN_DISP_DC     2 // A0? o que faz este pino?
+#define PIN_DISP_RST    4
+
+// Pinos dos Motores corrigidos (sem sobreposição)
+#define PIN_M1_STEP     26
+#define PIN_M1_DIR      25
+#define PIN_M1_EN       27
+
+#define PIN_M2_STEP     14
+#define PIN_M2_DIR      12 
+#define PIN_M2_EN       13 
+
+#define DEBOUNCE_MS     250
+#define TOTAL_PRODUTOS  3
+#define TIMEOUT_MOTOR   10000 // 10 segundos máximo para o motor girar
+
+// ==========================================
+// ESTRUTURAS DE DADOS
+// ==========================================
+typedef enum {
+    ESTADO_ESCOLHER_PRODUTO,
+    ESTADO_DISPENSANDO,
+    ESTADO_LIBERANDO_RETIRADA,
+    ESTADO_AGRADECER,
+    ESTADO_ERRO_DISPENSA
+} EstadoMaquina;
+
+typedef enum {
+    EVT_NENHUM,
+    EVT_BOTAO_ESQ,
+    EVT_BOTAO_DIR
+} EventoBotao;
+
+typedef struct {
+    uint8_t id;
+    const char *nome;
+    uint16_t preco_centavos;
+    uint8_t estoque;
+} Produto;
+
+typedef struct {
+    Produto produtos[TOTAL_PRODUTOS];
+    uint8_t selecionado;
+} Menu;
+
+// ==========================================
+// VARIÁVEIS GLOBAIS
+// ==========================================
 st7735_t display;
 a4988_t motor_p1;
 a4988_t motor_p2;
 
-#define btn_esq 19 // alterar
-#define btn_dir 21 // selecionar
-#define balanca 23
-#define DEBOUNCE_MS 500
-#define TOTAL_PRODUTOS 4
-
-
-uint32_t ultimoDebounce_esq = 0;
-uint32_t ultimoDebounce_dir = 0;
-
-// Estados do Sistema (Telas)
-typedef enum {
-    ESCOLHER_PRODUTO,
-    CONFIRMAR_PRODUTO,
-    // COBRANDO,
-    DISPENSANDO_PRODUTO,
-    LIBERANDO_RETIRADA,
-    AGRADECER,
-    // ERRO
-} Estado;
-
-static Estado estado_atual = ESCOLHER_PRODUTO;
-
-// Estrutura de Dados dos Produtos
-typedef struct {
-    uint8_t id;
-    const char *nome;
-    uint16_t preco_centavos; // Exemplo 500 para 5,00
-    uint8_t estoque;
-} Produto;
-
-// Estrutura de Dados do Menu
-typedef struct {
-    Produto produtos[TOTAL_PRODUTOS];
-    // const char *opcoes[3];
-    // uint8_t total_opcoes;
-    uint8_t selecionado;
-} Menu;
+EstadoMaquina estado_atual = ESTADO_ESCOLHER_PRODUTO;
+uint32_t tempo_estado_atual = 0; // Guarda o "millis" de quando o estado iniciou
+bool atualizar_tela = true;      // Flag para evitar redesenhar a tela sem necessidade
 
 static Menu meu_menu = {
     .produtos = {
-        {.id = 1, .nome = "1. Barra de chocolate", .preco_centavos = 700, .estoque = 5},
-        {.id = 2, .nome = "2. Confetes de amendoin 2", .preco_centavos = 500, .estoque = 0},
-        {.id = 3, .nome = "3. Produto 3", .preco_centavos = 420, .estoque = 2},
-        {.id = 3, .nome = "3. Produto 4", .preco_centavos = 600, .estoque = 8},
+        {.id = 1, .nome = "Castanhas", .preco_centavos = 700, .estoque = 5},
+        {.id = 2, .nome = "Chocolate", .preco_centavos = 500, .estoque = 3},
+        {.id = 3, .nome = "Salgadinho", .preco_centavos = 420, .estoque = 0},
     },
-    // .opcoes = {"1. Produto 1", "2. Produto 2", "3. Produto 3"},
-    // .total_opcoes = 3,
     .selecionado = 0
 };
 
-/**
- * Desenha a barra inferior dividida em duas caixas contextuais
- */
-void desenhar_rodape_botoes(st7735_t *dev, const char *txt_esq, const char *txt_dir) {
-    uint16_t y_rodape = 140;
-    uint16_t alt_rodape = 20;
-
-    // --- LADO ESQUERDO (Botão Esquerdo) ---
-    // Fundo em Verde Musgo para indicar área clicável
-    st7735_fill_rect(dev, 0, y_rodape, 63, alt_rodape, COLOR_MOSS_GREEN);
-    // Texto em tom Creme (alinhado à esquerda)
-    st7735_draw_string(dev, 4, y_rodape + 6, txt_esq, COLOR_CREAM);
-
-    // Linha divisória vertical no centro (separador)
-    st7735_fill_rect(dev, 63, y_rodape, 2, alt_rodape, COLOR_SAGE_DARK);
-
-    // --- LADO DIREITO (Botão Direito) ---
-    // Fundo em Laranja Quente (destaque para ação/seleção)
-    st7735_fill_rect(dev, 65, y_rodape, 63, alt_rodape, COLOR_ORANGE_WARM);
-    // Texto em Branco
-    st7735_draw_string(dev, 69, y_rodape + 6, txt_dir, COLOR_WHITE);
-}
-
-/**
- * Desenha o menu na tela ST7735 aplicando destaque na opção selecionada
- */
-void desenhar_menu(st7735_t *dev, Menu *m) {
-    // 1. Fundo
-    st7735_fill_screen(dev, COLOR_SAGE_DARK);
-
-    // 2. Cabeçalho
-    st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_MOSS_GREEN);
-    st7735_draw_string(dev, 10, 5, "SELECIONE:", COLOR_CREAM);
-
-    uint16_t y_inicial = 35;
-    uint8_t espacamento_y = 25;
-
-    for (uint8_t i = 0; i < TOTAL_PRODUTOS; i++) {
-        uint16_t y_pos = y_inicial + (i * espacamento_y);
-        Produto *p = &m->produtos[i];
-
-        if (i == m->selecionado) {
-            // Opção Selecionada: Retângulo Laranja Quente com texto Branco
-            st7735_fill_rect(dev, 2, y_pos - 3, 124, 18, COLOR_ORANGE_WARM);
-            st7735_draw_string(dev, 5, y_pos, ">", COLOR_AMBER);
-            st7735_draw_string(dev, 15, y_pos, p->nome, COLOR_WHITE);
-        } else {
-            // Opção Normal: Texto em tom Bege/Creme para leitura suave
-            st7735_draw_string(dev, 15, y_pos, p->nome, COLOR_CREAM);
-        }
-
-        // Exibe indicação de Esgotado
-        if (p->estoque == 0) {
-            st7735_draw_string(dev, 95, y_pos, "ESG", COLOR_RED);
-        }
-    }
-
-    // Desenha o rodapé duplo no final
-    desenhar_rodape_botoes(dev, "MUDAR", "ENTRA");
-}
-
-/**
- * Tela exibida ao confirmar a seleção de um produto
- */
-void desenhar_tela_dispensando(st7735_t *dev, uint8_t opcao) {
-    // 1. Fundo suave em Verde Sálvia Escuro
-    st7735_fill_screen(dev, COLOR_SAGE_DARK);
-
-    // 2. Cabeçalho de destaque em Laranja Quente com texto em Branco
-    st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_ORANGE_WARM);
-    st7735_draw_string(dev, 10, 5, "PROCESSANDO", COLOR_WHITE);
-
-    // 3. Rótulo "Entregando:" em tom Bege/Creme
-    st7735_draw_string(dev, 10, 35, "Entregando", COLOR_CREAM);
-
-    // 4. Nome do produto em destaque em tom Amarelo/Âmbar
-    st7735_draw_string(dev, 10, 55, meu_menu.produtos[opcao].nome, COLOR_AMBER);
-
-    // 5. Preço ou status secundário centralizado (Opcional, preenche o espaço visual)
-    st7735_draw_string(dev, 10, 85, "Aguarde...", COLOR_CREAM);
-
-    // 6. Barra inferior dividida (Esquerda: sem ação / Direita: Voltar)
-    desenhar_rodape_botoes(dev, " -- ", " -- ");
-}
-
-/**
- * Tela exibida ao liberar o produto para ser retirado
- */
-void desenhar_retirar_produto(st7735_t *dev, uint8_t opcao) {
-    // 1. Fundo suave em Verde Sálvia Escuro
-    st7735_fill_screen(dev, COLOR_SAGE_DARK);
-
-    // 2. Cabeçalho de destaque em Laranja Quente com texto em Branco
-    st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_ORANGE_WARM);
-    st7735_draw_string(dev, 10, 5, "Prontinho", COLOR_WHITE);
-
-    // 3. Rótulo "Entregando:" em tom Bege/Creme
-    st7735_draw_string(dev, 10, 35, "Retire o ", COLOR_CREAM);
-
-    // 4. Nome do produto em destaque em tom Amarelo/Âmbar
-    st7735_draw_string(dev, 10, 55, meu_menu.produtos[opcao].nome, COLOR_AMBER);
-
-    // 5. Preço ou status secundário centralizado (Opcional, preenche o espaço visual)
-    // st7735_draw_string(dev, 10, 85, "Aguarde...", COLOR_CREAM);
-
-    // 6. Barra inferior dividida (Esquerda: sem ação / Direita: Voltar)
-    desenhar_rodape_botoes(dev, " -- ", " -- ");
-}
-
-/**
- * Executa a ação da opção selecionada no menu
- */
-void executar_acao_menu(uint8_t opcao) {
-    switch (opcao) {
-        case 0:
-            estado_atual = DISPENSANDO_PRODUTO;
-            printf("Produto 1 Selecionad0\n");
-            while (gpio_get_level(balanca) == 1) {
-                printf("%d\n", gpio_get_level(balanca));
-                a4988_step(&motor_p1, 4, A4988_DIR_HOR);
-            }
-            a4988_disable(&motor_p1);
-            estado_atual = LIBERANDO_RETIRADA;
-            break;
-
-        case 1:
-            printf("Produto 2 Selecionado\n");
-            estado_atual = DISPENSANDO_PRODUTO;
-            while (gpio_get_level(balanca) == 1) {
-                a4988_step(&motor_p2, 600, A4988_DIR_HOR);
-            }
-            a4988_disable(&motor_p2);
-            estado_atual = LIBERANDO_RETIRADA;
-            break;
-
-        case 2:
-            printf("Produto Selecionado\n");
-            estado_atual = DISPENSANDO_PRODUTO;
-            while (gpio_get_level(balanca) == 1) {
-                a4988_step(&motor_p1, 600, A4988_DIR_HOR);
-            }
-            a4988_disable(&motor_p1);
-            break;
-
-        default:
-            break;
-    }
-}
-
-/**
- * Executa a ação do motor_p1 associada ao produto
- */
-void executar_acao_produto(uint8_t opcao) {
-    switch (opcao) {
-        case 0:
-            printf("Executando dispensa do Produto 1...\n");
-            // ex: a4988_step(&motor_p1, 200, A4988_DIR_HOR);
-            break;
-
-        case 1:
-            printf("Executando dispensa do Produto 2...\n");
-            // a4988_step(&motor_p1, 600, A4988_DIR_HOR);
-            // a4988_disable(&motor_p1);
-            break;
-
-        case 2:
-            printf("Executando dispensa do Produto 3...\n");
-            // a4988_step(&motor_p1, 300, A4988_DIR_ANT);
-            // a4988_disable(&motor_p1);
-            break;
-    }
-}
-
-void configure_btns () {
-    gpio_reset_pin(btn_dir);
-    gpio_reset_pin(btn_esq);
-
-    gpio_set_direction(btn_dir, GPIO_MODE_INPUT);
-    gpio_set_direction(btn_esq, GPIO_MODE_INPUT);
-
-    gpio_set_pull_mode(btn_dir, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(btn_esq, GPIO_PULLUP_ONLY);
-}
-
-void configure_balanca () {
-    gpio_reset_pin(balanca);
-    gpio_set_direction(balanca, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(balanca, GPIO_PULLUP_ONLY);
-}
-
+// ==========================================
+// FUNÇÕES AUXILIARES
+// ==========================================
 uint32_t millis(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+// ==========================================
+// FUNÇÕES DE INTERFACE (DISPLAY)
+// ==========================================
+void desenhar_rodape_botoes(st7735_t *dev, const char *txt_esq, const char *txt_dir) {
+    uint16_t y_rodape = 140;
+    st7735_fill_rect(dev, 0, y_rodape, 63, 20, COLOR_MOSS_GREEN);
+    st7735_draw_string(dev, 4, y_rodape + 6, txt_esq, COLOR_CREAM);
+    st7735_fill_rect(dev, 63, y_rodape, 2, 20, COLOR_SAGE_DARK);
+    st7735_fill_rect(dev, 65, y_rodape, 63, 20, COLOR_ORANGE_WARM);
+    st7735_draw_string(dev, 69, y_rodape + 6, txt_dir, COLOR_WHITE);
+}
+
+void desenhar_tela(st7735_t *dev, EstadoMaquina estado, Menu *m) {
+    st7735_fill_screen(dev, COLOR_SAGE_DARK); // Limpa o fundo
+
+    if (estado == ESTADO_ESCOLHER_PRODUTO) {
+        st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_MOSS_GREEN);
+        st7735_draw_string(dev, 10, 5, "SELECIONE:", COLOR_CREAM);
+
+        uint16_t y_inicial = 35;
+        for (uint8_t i = 0; i < TOTAL_PRODUTOS; i++) {
+            uint16_t y = y_inicial + (i * 25);
+            if (i == m->selecionado) {
+                st7735_fill_rect(dev, 2, y - 3, 124, 18, COLOR_ORANGE_WARM);
+                st7735_draw_string(dev, 5, y, ">", COLOR_AMBER);
+                st7735_draw_string(dev, 15, y, m->produtos[i].nome, COLOR_WHITE);
+            } else {
+                st7735_draw_string(dev, 15, y, m->produtos[i].nome, COLOR_CREAM);
+            }
+
+            if (m->produtos[i].estoque == 0) {
+                st7735_draw_string(dev, 95, y, "ESG", COLOR_RED);
+            }
+        }
+        desenhar_rodape_botoes(dev, "MUDAR", "ENTRA");
+    } 
+    else if (estado == ESTADO_DISPENSANDO) {
+        st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_ORANGE_WARM);
+        st7735_draw_string(dev, 10, 5, "PROCESSANDO", COLOR_WHITE);
+        st7735_draw_string(dev, 10, 35, "Entregando...", COLOR_CREAM);
+        st7735_draw_string(dev, 10, 55, m->produtos[m->selecionado].nome, COLOR_AMBER);
+    }
+    else if (estado == ESTADO_LIBERANDO_RETIRADA) {
+        st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_GREEN);
+        st7735_draw_string(dev, 10, 5, "PRONTINHO!", COLOR_WHITE);
+        st7735_draw_string(dev, 10, 45, "Pode retirar", COLOR_CREAM);
+        st7735_draw_string(dev, 10, 65, "seu produto.", COLOR_WHITE);
+    }
+    else if (estado == ESTADO_AGRADECER) {
+        st7735_draw_string(dev, 20, 50, "MUITO", COLOR_WHITE);
+        st7735_draw_string(dev, 20, 70, "OBRIGADO!", COLOR_AMBER);
+    }
+    else if (estado == ESTADO_ERRO_DISPENSA) {
+        st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_RED);
+        st7735_draw_string(dev, 10, 5, "FALHA!", COLOR_WHITE);
+        st7735_draw_string(dev, 10, 45, "Produto preso", COLOR_CREAM);
+        st7735_draw_string(dev, 10, 65, "Consulte suporte.", COLOR_WHITE);
+    }
+}
+
+// ==========================================
+// LEITURA DE BOTÕES (Não bloqueante)
+// ==========================================
+EventoBotao ler_botoes() {
+    static uint32_t ultimo_debounce_esq = 0;
+    static uint32_t ultimo_debounce_dir = 0;
+    uint32_t agora = millis();
+
+    if (gpio_get_level(PIN_BTN_ESQ) == 0 && (agora - ultimo_debounce_esq > DEBOUNCE_MS)) {
+        ultimo_debounce_esq = agora;
+        return EVT_BOTAO_ESQ;
+    }
+    if (gpio_get_level(PIN_BTN_DIR) == 0 && (agora - ultimo_debounce_dir > DEBOUNCE_MS)) {
+        ultimo_debounce_dir = agora;
+        return EVT_BOTAO_DIR;
+    }
+    return EVT_NENHUM;
+}
+
+// ==========================================
+// FUNÇÃO PRINCIPAL (Super Loop)
+// ==========================================
 void app_main(void) {
-    // Inicialização dos botões
-    configure_btns();
+    // 1. Configuração de Hardware
+    gpio_set_direction(PIN_BTN_DIR, GPIO_MODE_INPUT);
+    gpio_set_direction(PIN_BTN_ESQ, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(PIN_BTN_DIR, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(PIN_BTN_ESQ, GPIO_PULLUP_ONLY);
 
-    // Inicialiar balanca
-    configure_balanca();
+    gpio_set_direction(PIN_BALANCA, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(PIN_BALANCA, GPIO_PULLUP_ONLY);
 
-    // Inicialização do Display (SCK=18, MOSI=22, CS=5, DC=2, RST=4)
-    st7735_init(&display, SPI2_HOST, GPIO_NUM_18, GPIO_NUM_22, GPIO_NUM_5, GPIO_NUM_2, GPIO_NUM_4);
+    st7735_init(&display, SPI2_HOST, PIN_DISP_SCK, PIN_DISP_MOSI, PIN_DISP_CS, PIN_DISP_DC, PIN_DISP_RST);
+    a4988_init(&motor_p1, PIN_M1_STEP, PIN_M1_DIR, PIN_M1_EN, 12000);
+    a4988_init(&motor_p2, PIN_M2_STEP, PIN_M2_DIR, PIN_M2_EN, 12000);
 
-    // Inicialização do motor A4988 (STEP=26, DIR=25, ENABLE=27, Delay=2000 us)
-    a4988_init(&motor_p1, GPIO_NUM_26, GPIO_NUM_25, GPIO_NUM_27, 3000);
-    a4988_init(&motor_p2, GPIO_NUM_14, GPIO_NUM_27, GPIO_NUM_26, 3000);
-
-    // Tela de Splash Inicial
+    // Splash inicial (só roda 1 vez, pode usar delay aqui)
     st7735_fill_screen(&display, COLOR_BLACK);
-    st7735_fill_rect(&display, 5, 5, 118, 20, COLOR_BLUE);
-    st7735_draw_string(&display, 10, 10, "Bem-vindo", COLOR_WHITE);
-    st7735_draw_string(&display, 10, 35, "Maquina", COLOR_GREEN);
-    st7735_draw_string(&display, 10, 60, "de Vendas", COLOR_RED);
+    st7735_draw_string(&display, 10, 30, "Iniciando...", COLOR_WHITE);
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    desenhar_menu(&display, &meu_menu);
-
-    // Loop do Menu com transição automática
+    // 2. Loop Principal (Máquina de Estados Não-Bloqueante)
     while (1) {
         uint32_t agora = millis();
-
-        // Avança ciclicamente para a próxima opção (0 -> 1 -> 2 -> 0)
-        // meu_menu.selecionado = (meu_menu.selecionado + 1) % meu_menu.total_opcoes;
-
-        if (estado_atual == LIBERANDO_RETIRADA) {
-            printf("Liberando Retirada");
-            // mostrar tela solicitando que o usuário pegue o produto
-            desenhar_retirar_produto(&display, meu_menu.selecionado);
-            
-            // aguardar 4 segundos
-            vTaskDelay(pdMS_TO_TICKS(4000));
-
-            // alterar estado
-            estado_atual = AGRADECER;
+        EventoBotao evt = ler_botoes(); // Lê os botões a cada ciclo
+        
+        // Se a flag de redesenhar a tela estiver ativa, desenha apenas uma vez
+        if (atualizar_tela) {
+            desenhar_tela(&display, estado_atual, &meu_menu);
+            atualizar_tela = false; 
         }
 
-        if (estado_atual == AGRADECER) {
-            // mostrar tela agradecendo
-
-            // aguardar 3 segundos
-
-            // voltar para o primeiro estado 
-            estado_atual = ESCOLHER_PRODUTO;
-            desenhar_menu(&display, &meu_menu);
-        }
-        // ------------------ BOTÃO ESQUERDO (Alterna entre opções) ------------------
-        if (gpio_get_level(btn_esq) == 0) {
-            if (agora - ultimoDebounce_esq >= DEBOUNCE_MS) {
-                ultimoDebounce_esq = agora; // Atualiza o tempo do debounce
-                printf("Botão esquerdo pressionado\n");
-
-                if (estado_atual == ESCOLHER_PRODUTO) {
-                    // Avança ciclicamente para a próxima opção (0 -> 1 -> 2 -> 0)
+        switch (estado_atual) {
+            case ESTADO_ESCOLHER_PRODUTO:
+                if (evt == EVT_BOTAO_ESQ) {
+                    // Alterna opção
                     meu_menu.selecionado = (meu_menu.selecionado + 1) % TOTAL_PRODUTOS;
-                    printf("Menu selecionado: %d\n", meu_menu.selecionado);
-
-                    // Executa a ação atribuída à opção ativa
-                    // executar_acao_menu(meu_menu.selecionado);
-
-                    // Redesenha a tela destacando a opção atual
-                    desenhar_menu(&display, &meu_menu);
-                } else if (estado_atual == DISPENSANDO_PRODUTO) {
-                    // NADA
-                }
-            }
-            
-        }
-
-        // ------------------ BOTÃO DIREITO (Seleciona / Entra na Tela) ------------------
-        if (gpio_get_level(btn_dir) == 0) {
-            if (agora - ultimoDebounce_dir >= DEBOUNCE_MS) {
-                ultimoDebounce_dir = agora;
-                printf("Botão direito pressionado\n");
-
-                if (estado_atual == ESCOLHER_PRODUTO) {
-                    Produto *p_selecionado = &meu_menu.produtos[meu_menu.selecionado];
-
-                    if (p_selecionado->estoque > 0) {
-                        // Tem estoque: decrementa e inicia a entrega
-                        p_selecionado->estoque--; 
-                        
-                        estado_atual = DISPENSANDO_PRODUTO;
-                        desenhar_tela_dispensando(&display, meu_menu.selecionado);
-                        // executar_acao_produto(meu_menu.selecionado);
-                        executar_acao_menu(meu_menu.selecionado);
-                    } else {
-                        // Sem estoque: exibe aviso / ignora o clique
-                        printf("Produto esgotado! Estoque: 0\n");
-                        // Opcional: desenhar mensagem rápida "Esgotado!" na tela
+                    atualizar_tela = true;
+                } 
+                else if (evt == EVT_BOTAO_DIR) {
+                    // Confirma seleção
+                    if (meu_menu.produtos[meu_menu.selecionado].estoque > 0) {
+                        estado_atual = ESTADO_DISPENSANDO;
+                        tempo_estado_atual = agora; // Marca a hora que iniciou a dispensa
+                        atualizar_tela = true;
                     }
-                } else if (estado_atual == DISPENSANDO_PRODUTO) {
-                    // nada
-                    // estado_atual = ESCOLHER_PRODUTO;
-                    // desenhar_menu(&display, &meu_menu);
                 }
-            }
+                break;
+
+            case ESTADO_DISPENSANDO:
+                // Motor gira em pequenos passos a cada volta do loop (NÃO BLOQUEIA O ESP32)
+                if (meu_menu.selecionado == 0 || meu_menu.selecionado == 2) {
+                    a4988_step(&motor_p1, 6, A4988_DIR_ANT); // Dá 10 passinhos rápidos e solta a CPU
+                } else {
+                    a4988_step(&motor_p2, 6, A4988_DIR_ANT);
+                }
+
+                // Condição de Sucesso: Produto caiu na balança
+                if (gpio_get_level(PIN_BALANCA) == 0) {
+                    a4988_disable(&motor_p1);
+                    a4988_disable(&motor_p2);
+                    meu_menu.produtos[meu_menu.selecionado].estoque--; // Debita estoque apenas se entregou
+                    estado_atual = ESTADO_LIBERANDO_RETIRADA;
+                    tempo_estado_atual = agora;
+                    atualizar_tela = true;
+                }
+                // Condição de Falha: Produto engasgou (Timeout)
+                else if (agora - tempo_estado_atual > TIMEOUT_MOTOR) {
+                    a4988_disable(&motor_p1);
+                    a4988_disable(&motor_p2);
+                    estado_atual = ESTADO_ERRO_DISPENSA;
+                    tempo_estado_atual = agora;
+                    atualizar_tela = true;
+                }
+                break;
+
+            case ESTADO_LIBERANDO_RETIRADA:
+                // Espera 4 segundos SEM TRAVAR o processador
+                if (agora - tempo_estado_atual > 4000) {
+                    estado_atual = ESTADO_AGRADECER;
+                    tempo_estado_atual = agora;
+                    atualizar_tela = true;
+                }
+                break;
+
+            case ESTADO_AGRADECER:
+                // Espera 3 segundos SEM TRAVAR o processador
+                if (agora - tempo_estado_atual > 3000) {
+                    estado_atual = ESTADO_ESCOLHER_PRODUTO;
+                    atualizar_tela = true;
+                }
+                break;
+
+            case ESTADO_ERRO_DISPENSA:
+                // Mostra erro por 4 segundos e volta para o menu
+                if (agora - tempo_estado_atual > 4000) {
+                    estado_atual = ESTADO_ESCOLHER_PRODUTO;
+                    atualizar_tela = true;
+                }
+                break;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // ÚNICO DELAY DO LOOP INTEIRO: Fundamental para o FreeRTOS respirar (Idle Task)
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
