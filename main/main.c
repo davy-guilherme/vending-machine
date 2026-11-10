@@ -7,12 +7,14 @@
 
 // Instâncias de Hardware
 st7735_t display;
-a4988_t motor;
+a4988_t motor_p1;
+a4988_t motor_p2;
 
 #define btn_esq 19 // alterar
 #define btn_dir 21 // selecionar
+#define balanca 23
 #define DEBOUNCE_MS 500
-#define TOTAL_PRODUTOS 3
+#define TOTAL_PRODUTOS 4
 
 
 uint32_t ultimoDebounce_esq = 0;
@@ -20,16 +22,16 @@ uint32_t ultimoDebounce_dir = 0;
 
 // Estados do Sistema (Telas)
 typedef enum {
-    MENU_PRINCIPAL,
-    // CONFIRMANDO_PRODUTO,
+    ESCOLHER_PRODUTO,
+    CONFIRMAR_PRODUTO,
     // COBRANDO,
     DISPENSANDO_PRODUTO,
-    // LIBERANDO_RETIRADA,
-    // AGRADECENDO,
+    LIBERANDO_RETIRADA,
+    AGRADECER,
     // ERRO
 } Estado;
 
-static Estado tela_atual = MENU_PRINCIPAL;
+static Estado estado_atual = ESCOLHER_PRODUTO;
 
 // Estrutura de Dados dos Produtos
 typedef struct {
@@ -49,9 +51,10 @@ typedef struct {
 
 static Menu meu_menu = {
     .produtos = {
-        {.id = 1, .nome = "1. Produto 1", .preco_centavos = 350, .estoque = 5},
-        {.id = 2, .nome = "2. Produto 2", .preco_centavos = 500, .estoque = 0},
-        {.id = 3, .nome = "3. Produto 3", .preco_centavos = 400, .estoque = 2},
+        {.id = 1, .nome = "1. Barra de chocolate", .preco_centavos = 700, .estoque = 5},
+        {.id = 2, .nome = "2. Confetes de amendoin 2", .preco_centavos = 500, .estoque = 0},
+        {.id = 3, .nome = "3. Produto 3", .preco_centavos = 420, .estoque = 2},
+        {.id = 3, .nome = "3. Produto 4", .preco_centavos = 600, .estoque = 8},
     },
     // .opcoes = {"1. Produto 1", "2. Produto 2", "3. Produto 3"},
     // .total_opcoes = 3,
@@ -140,7 +143,31 @@ void desenhar_tela_dispensando(st7735_t *dev, uint8_t opcao) {
     st7735_draw_string(dev, 10, 85, "Aguarde...", COLOR_CREAM);
 
     // 6. Barra inferior dividida (Esquerda: sem ação / Direita: Voltar)
-    desenhar_rodape_botoes(dev, "  --", "VOLTAR>");
+    desenhar_rodape_botoes(dev, " -- ", " -- ");
+}
+
+/**
+ * Tela exibida ao liberar o produto para ser retirado
+ */
+void desenhar_retirar_produto(st7735_t *dev, uint8_t opcao) {
+    // 1. Fundo suave em Verde Sálvia Escuro
+    st7735_fill_screen(dev, COLOR_SAGE_DARK);
+
+    // 2. Cabeçalho de destaque em Laranja Quente com texto em Branco
+    st7735_fill_rect(dev, 0, 0, 128, 20, COLOR_ORANGE_WARM);
+    st7735_draw_string(dev, 10, 5, "Prontinho", COLOR_WHITE);
+
+    // 3. Rótulo "Entregando:" em tom Bege/Creme
+    st7735_draw_string(dev, 10, 35, "Retire o ", COLOR_CREAM);
+
+    // 4. Nome do produto em destaque em tom Amarelo/Âmbar
+    st7735_draw_string(dev, 10, 55, meu_menu.produtos[opcao].nome, COLOR_AMBER);
+
+    // 5. Preço ou status secundário centralizado (Opcional, preenche o espaço visual)
+    // st7735_draw_string(dev, 10, 85, "Aguarde...", COLOR_CREAM);
+
+    // 6. Barra inferior dividida (Esquerda: sem ação / Direita: Voltar)
+    desenhar_rodape_botoes(dev, " -- ", " -- ");
 }
 
 /**
@@ -149,19 +176,33 @@ void desenhar_tela_dispensando(st7735_t *dev, uint8_t opcao) {
 void executar_acao_menu(uint8_t opcao) {
     switch (opcao) {
         case 0:
+            estado_atual = DISPENSANDO_PRODUTO;
             printf("Produto 1 Selecionad0\n");
+            while (gpio_get_level(balanca) == 1) {
+                printf("%d\n", gpio_get_level(balanca));
+                a4988_step(&motor_p1, 4, A4988_DIR_HOR);
+            }
+            a4988_disable(&motor_p1);
+            estado_atual = LIBERANDO_RETIRADA;
             break;
 
         case 1:
             printf("Produto 2 Selecionado\n");
-            // a4988_step(&motor, 600, A4988_DIR_HOR);
-            // a4988_disable(&motor);
+            estado_atual = DISPENSANDO_PRODUTO;
+            while (gpio_get_level(balanca) == 1) {
+                a4988_step(&motor_p2, 600, A4988_DIR_HOR);
+            }
+            a4988_disable(&motor_p2);
+            estado_atual = LIBERANDO_RETIRADA;
             break;
 
         case 2:
             printf("Produto Selecionado\n");
-            // a4988_step(&motor, 300, A4988_DIR_ANT);
-            // a4988_disable(&motor);
+            estado_atual = DISPENSANDO_PRODUTO;
+            while (gpio_get_level(balanca) == 1) {
+                a4988_step(&motor_p1, 600, A4988_DIR_HOR);
+            }
+            a4988_disable(&motor_p1);
             break;
 
         default:
@@ -170,25 +211,25 @@ void executar_acao_menu(uint8_t opcao) {
 }
 
 /**
- * Executa a ação do motor associada ao produto
+ * Executa a ação do motor_p1 associada ao produto
  */
 void executar_acao_produto(uint8_t opcao) {
     switch (opcao) {
         case 0:
             printf("Executando dispensa do Produto 1...\n");
-            // ex: a4988_step(&motor, 200, A4988_DIR_HOR);
+            // ex: a4988_step(&motor_p1, 200, A4988_DIR_HOR);
             break;
 
         case 1:
             printf("Executando dispensa do Produto 2...\n");
-            // a4988_step(&motor, 600, A4988_DIR_HOR);
-            // a4988_disable(&motor);
+            // a4988_step(&motor_p1, 600, A4988_DIR_HOR);
+            // a4988_disable(&motor_p1);
             break;
 
         case 2:
             printf("Executando dispensa do Produto 3...\n");
-            // a4988_step(&motor, 300, A4988_DIR_ANT);
-            // a4988_disable(&motor);
+            // a4988_step(&motor_p1, 300, A4988_DIR_ANT);
+            // a4988_disable(&motor_p1);
             break;
     }
 }
@@ -204,6 +245,12 @@ void configure_btns () {
     gpio_set_pull_mode(btn_esq, GPIO_PULLUP_ONLY);
 }
 
+void configure_balanca () {
+    gpio_reset_pin(balanca);
+    gpio_set_direction(balanca, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(balanca, GPIO_PULLUP_ONLY);
+}
+
 uint32_t millis(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
@@ -212,11 +259,15 @@ void app_main(void) {
     // Inicialização dos botões
     configure_btns();
 
+    // Inicialiar balanca
+    configure_balanca();
+
     // Inicialização do Display (SCK=18, MOSI=22, CS=5, DC=2, RST=4)
     st7735_init(&display, SPI2_HOST, GPIO_NUM_18, GPIO_NUM_22, GPIO_NUM_5, GPIO_NUM_2, GPIO_NUM_4);
 
-    // Inicialização do Motor A4988 (STEP=26, DIR=25, ENABLE=27, Delay=2000 us)
-    a4988_init(&motor, GPIO_NUM_26, GPIO_NUM_25, GPIO_NUM_27, 2000);
+    // Inicialização do motor A4988 (STEP=26, DIR=25, ENABLE=27, Delay=2000 us)
+    a4988_init(&motor_p1, GPIO_NUM_26, GPIO_NUM_25, GPIO_NUM_27, 3000);
+    a4988_init(&motor_p2, GPIO_NUM_14, GPIO_NUM_27, GPIO_NUM_26, 3000);
 
     // Tela de Splash Inicial
     st7735_fill_screen(&display, COLOR_BLACK);
@@ -236,45 +287,76 @@ void app_main(void) {
         // Avança ciclicamente para a próxima opção (0 -> 1 -> 2 -> 0)
         // meu_menu.selecionado = (meu_menu.selecionado + 1) % meu_menu.total_opcoes;
 
+        if (estado_atual == LIBERANDO_RETIRADA) {
+            printf("Liberando Retirada");
+            // mostrar tela solicitando que o usuário pegue o produto
+            desenhar_retirar_produto(&display, meu_menu.selecionado);
+            
+            // aguardar 4 segundos
+            vTaskDelay(pdMS_TO_TICKS(4000));
+
+            // alterar estado
+            estado_atual = AGRADECER;
+        }
+
+        if (estado_atual == AGRADECER) {
+            // mostrar tela agradecendo
+
+            // aguardar 3 segundos
+
+            // voltar para o primeiro estado 
+            estado_atual = ESCOLHER_PRODUTO;
+            desenhar_menu(&display, &meu_menu);
+        }
+        // ------------------ BOTÃO ESQUERDO (Alterna entre opções) ------------------
         if (gpio_get_level(btn_esq) == 0) {
             if (agora - ultimoDebounce_esq >= DEBOUNCE_MS) {
                 ultimoDebounce_esq = agora; // Atualiza o tempo do debounce
-                printf("Botão esquerdo pressonado\n");
-                // Avança ciclicamente para a próxima opção (0 -> 1 -> 2 -> 0)
-                meu_menu.selecionado = (meu_menu.selecionado + 1) % TOTAL_PRODUTOS;
-                printf("Menu selecionado: %d\n", meu_menu.selecionado);
+                printf("Botão esquerdo pressionado\n");
 
-                // Executa a ação atribuída à opção ativa
-                executar_acao_menu(meu_menu.selecionado);
+                if (estado_atual == ESCOLHER_PRODUTO) {
+                    // Avança ciclicamente para a próxima opção (0 -> 1 -> 2 -> 0)
+                    meu_menu.selecionado = (meu_menu.selecionado + 1) % TOTAL_PRODUTOS;
+                    printf("Menu selecionado: %d\n", meu_menu.selecionado);
 
-                // Redesenha a tela destacando a opção atual
-                desenhar_menu(&display, &meu_menu);
+                    // Executa a ação atribuída à opção ativa
+                    // executar_acao_menu(meu_menu.selecionado);
+
+                    // Redesenha a tela destacando a opção atual
+                    desenhar_menu(&display, &meu_menu);
+                } else if (estado_atual == DISPENSANDO_PRODUTO) {
+                    // NADA
+                }
             }
+            
         }
 
         // ------------------ BOTÃO DIREITO (Seleciona / Entra na Tela) ------------------
         if (gpio_get_level(btn_dir) == 0) {
             if (agora - ultimoDebounce_dir >= DEBOUNCE_MS) {
                 ultimoDebounce_dir = agora;
+                printf("Botão direito pressionado\n");
 
-                if (tela_atual == MENU_PRINCIPAL) {
+                if (estado_atual == ESCOLHER_PRODUTO) {
                     Produto *p_selecionado = &meu_menu.produtos[meu_menu.selecionado];
 
                     if (p_selecionado->estoque > 0) {
                         // Tem estoque: decrementa e inicia a entrega
                         p_selecionado->estoque--; 
                         
-                        tela_atual = DISPENSANDO_PRODUTO;
+                        estado_atual = DISPENSANDO_PRODUTO;
                         desenhar_tela_dispensando(&display, meu_menu.selecionado);
-                        executar_acao_produto(meu_menu.selecionado);
+                        // executar_acao_produto(meu_menu.selecionado);
+                        executar_acao_menu(meu_menu.selecionado);
                     } else {
                         // Sem estoque: exibe aviso / ignora o clique
                         printf("Produto esgotado! Estoque: 0\n");
                         // Opcional: desenhar mensagem rápida "Esgotado!" na tela
                     }
-                } else if (tela_atual == DISPENSANDO_PRODUTO) {
-                    tela_atual = MENU_PRINCIPAL;
-                    desenhar_menu(&display, &meu_menu);
+                } else if (estado_atual == DISPENSANDO_PRODUTO) {
+                    // nada
+                    // estado_atual = ESCOLHER_PRODUTO;
+                    // desenhar_menu(&display, &meu_menu);
                 }
             }
         }
