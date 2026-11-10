@@ -29,7 +29,7 @@
 #define PIN_M2_EN       13 
 
 #define DEBOUNCE_MS     250
-#define TOTAL_PRODUTOS  3
+// #define TOTAL_PRODUTOS  3
 #define TIMEOUT_MOTOR   10000 // 10 segundos máximo para o motor girar
 
 // ==========================================
@@ -51,13 +51,15 @@ typedef enum {
 
 typedef struct {
     uint8_t id;
-    const char *nome;
+    char nome[20];            // Nome ajustável
     uint16_t preco_centavos;
     uint8_t estoque;
+    uint8_t motor_id;         // Qual motor (1 ou 2) atua neste produto
 } Produto;
 
 typedef struct {
-    Produto produtos[TOTAL_PRODUTOS];
+    Produto *produtos;        // Array dinâmico na RAM
+    uint8_t total_produtos;
     uint8_t selecionado;
 } Menu;
 
@@ -72,12 +74,17 @@ EstadoMaquina estado_atual = ESTADO_ESCOLHER_PRODUTO;
 uint32_t tempo_estado_atual = 0; // Guarda o "millis" de quando o estado iniciou
 bool atualizar_tela = true;      // Flag para evitar redesenhar a tela sem necessidade
 
+// 1. Array com os produtos iniciais cadastrados
+static Produto produtos_iniciais[] = {
+    {.id = 1, .nome = "Castanhas",  .preco_centavos = 700, .estoque = 5, .motor_id = 1},
+    {.id = 2, .nome = "Chocolate",  .preco_centavos = 500, .estoque = 3, .motor_id = 2},
+    {.id = 3, .nome = "Salgadinho", .preco_centavos = 420, .estoque = 0, .motor_id = 1},
+};
+
+// Estrutura Menu apontando para o array inicial
 static Menu meu_menu = {
-    .produtos = {
-        {.id = 1, .nome = "Castanhas", .preco_centavos = 700, .estoque = 5},
-        {.id = 2, .nome = "Chocolate", .preco_centavos = 500, .estoque = 3},
-        {.id = 3, .nome = "Salgadinho", .preco_centavos = 420, .estoque = 0},
-    },
+    .produtos = produtos_iniciais,
+    .total_produtos = sizeof(produtos_iniciais) / sizeof(produtos_iniciais[0]), // Calcula automaticamente
     .selecionado = 0
 };
 
@@ -108,7 +115,7 @@ void desenhar_tela(st7735_t *dev, EstadoMaquina estado, Menu *m) {
         st7735_draw_string(dev, 10, 5, "SELECIONE:", COLOR_CREAM);
 
         uint16_t y_inicial = 35;
-        for (uint8_t i = 0; i < TOTAL_PRODUTOS; i++) {
+        for (uint8_t i = 0; i < m->total_produtos; i++) {
             uint16_t y = y_inicial + (i * 25);
             if (i == m->selecionado) {
                 st7735_fill_rect(dev, 2, y - 3, 124, 18, COLOR_ORANGE_WARM);
@@ -181,8 +188,8 @@ void app_main(void) {
     gpio_set_pull_mode(PIN_BALANCA, GPIO_PULLUP_ONLY);
 
     st7735_init(&display, SPI2_HOST, PIN_DISP_SCK, PIN_DISP_MOSI, PIN_DISP_CS, PIN_DISP_DC, PIN_DISP_RST);
-    a4988_init(&motor_p1, PIN_M1_STEP, PIN_M1_DIR, PIN_M1_EN, 12000);
-    a4988_init(&motor_p2, PIN_M2_STEP, PIN_M2_DIR, PIN_M2_EN, 12000);
+    a4988_init(&motor_p1, PIN_M1_STEP, PIN_M1_DIR, PIN_M1_EN, 13000);
+    a4988_init(&motor_p2, PIN_M2_STEP, PIN_M2_DIR, PIN_M2_EN, 13000);
 
     // Splash inicial (só roda 1 vez, pode usar delay aqui)
     st7735_fill_screen(&display, COLOR_BLACK);
@@ -204,7 +211,7 @@ void app_main(void) {
             case ESTADO_ESCOLHER_PRODUTO:
                 if (evt == EVT_BOTAO_ESQ) {
                     // Alterna opção
-                    meu_menu.selecionado = (meu_menu.selecionado + 1) % TOTAL_PRODUTOS;
+                    meu_menu.selecionado = (meu_menu.selecionado + 1) % meu_menu.total_produtos;
                     atualizar_tela = true;
                 } 
                 else if (evt == EVT_BOTAO_DIR) {
@@ -220,9 +227,9 @@ void app_main(void) {
             case ESTADO_DISPENSANDO:
                 // Motor gira em pequenos passos a cada volta do loop (NÃO BLOQUEIA O ESP32)
                 if (meu_menu.selecionado == 0 || meu_menu.selecionado == 2) {
-                    a4988_step(&motor_p1, 6, A4988_DIR_ANT); // Dá 10 passinhos rápidos e solta a CPU
+                    a4988_step(&motor_p1, 6, A4988_DIR_HOR); // Dá 10 passinhos rápidos e solta a CPU
                 } else {
-                    a4988_step(&motor_p2, 6, A4988_DIR_ANT);
+                    a4988_step(&motor_p2, 6, A4988_DIR_HOR);
                 }
 
                 // Condição de Sucesso: Produto caiu na balança
